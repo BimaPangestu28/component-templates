@@ -1,0 +1,17 @@
+id: ai.greentic.component-templates.default
+kind: component-config
+description: Auto-generated default config for ai.greentic.component-templates
+nodes:
+  emit_config:
+    template: |-
+      {
+        "node_id": "COMPONENT_STEP",
+        "node": {
+          "tool": {
+            "component": "ai.greentic.component-templates"
+          },
+          "routing": [
+            { "to": "NEXT_NODE_PLACEHOLDER" }
+          ]
+        }
+      }

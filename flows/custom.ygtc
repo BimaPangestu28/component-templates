@@ -1,0 +1,36 @@
+id: ai.greentic.component-templates.custom
+kind: component-config
+description: Auto-generated custom config for ai.greentic.component-templates
+nodes:
+  ask_config:
+    questions:
+      fields:
+      - id: output_path
+        prompt: Dot path where the rendered string is stored
+        type: string
+        default: text
+      - id: template
+        prompt: Handlebars template used to render the reply
+        type: string
+      - id: wrap
+        prompt: Wrap output in an object when true; emit a raw string when false
+        type: boolean
+        default: true
+    routing:
+    - to: emit_config
+  emit_config:
+    template: |-
+      {
+        "node_id": "COMPONENT_STEP",
+        "node": {
+          "tool": {
+            "component": "ai.greentic.component-templates",
+            "output_path": "{{state.output_path}}",
+            "template": "{{state.template}}",
+            "wrap": {{state.wrap}}
+          },
+          "routing": [
+            { "to": "NEXT_NODE_PLACEHOLDER" }
+          ]
+        }
+      }

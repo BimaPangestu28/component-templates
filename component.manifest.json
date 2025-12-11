@@ -1,49 +1,76 @@
 {
   "$schema": "https://greentic-ai.github.io/greentic-component/schemas/v1/component.manifest.schema.json",
-  "id": "ai.greentic.component-templates",
-  "name": "component-templates",
-  "version": "0.1.0",
-  "world": "greentic:component/component@0.4.0",
+  "artifacts": {
+    "component_wasm": "target/wasm32-wasip2/release/component_templates.wasm"
+  },
+  "capabilities": {
+    "host": {
+      "messaging": {
+        "inbound": true,
+        "outbound": true
+      },
+      "secrets": {
+        "required": []
+      },
+      "telemetry": {
+        "scope": "node"
+      }
+    },
+    "wasi": {
+      "clocks": true,
+      "filesystem": {
+        "mode": "none",
+        "mounts": []
+      },
+      "random": true
+    }
+  },
+  "config_schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "output_path": {
+        "default": "text",
+        "description": "Dot path where the rendered string is stored",
+        "type": "string",
+        "x-default-applied": true
+      },
+      "template": {
+        "description": "Handlebars template used to render the reply",
+        "type": "string"
+      },
+      "wrap": {
+        "default": true,
+        "description": "Wrap output in an object when true; emit a raw string when false",
+        "type": "boolean",
+        "x-default-applied": true
+      }
+    },
+    "required": [
+      "template"
+    ],
+    "title": "component-templates component configuration",
+    "type": "object"
+  },
   "describe_export": "get-manifest",
-  "supports": [
-    "messaging"
-  ],
+  "hashes": {
+    "component_wasm": "blake3:24f7f608f662995b0767584ae156b3f32beb62919eb71b030ffc2a46617f5bf5"
+  },
+  "id": "ai.greentic.component-templates",
+  "limits": {
+    "memory_mb": 128,
+    "wall_time_ms": 1000
+  },
+  "name": "component-templates",
   "profiles": {
     "default": "stateless",
     "supported": [
       "stateless"
     ]
   },
-  "capabilities": {
-    "wasi": {
-      "filesystem": {
-        "mode": "none",
-        "mounts": []
-      },
-      "random": true,
-      "clocks": true
-    },
-    "host": {
-      "messaging": {
-        "inbound": true,
-        "outbound": true
-      },
-      "telemetry": {
-        "scope": "node"
-      },
-      "secrets": {
-        "required": []
-      }
-    }
-  },
-  "limits": {
-    "memory_mb": 128,
-    "wall_time_ms": 1000
-  },
-  "artifacts": {
-    "component_wasm": "target/wasm32-wasip2/release/component_templates.wasm"
-  },
-  "hashes": {
-    "component_wasm": "blake3:23af7e6e05b65345ff5ee4c98e7fec9450045260a584eebf663424c2d7d96494"
-  }
+  "supports": [
+    "messaging"
+  ],
+  "version": "0.1.0",
+  "world": "greentic:component/component@0.4.0"
 }
