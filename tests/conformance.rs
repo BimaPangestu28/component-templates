@@ -40,7 +40,6 @@ fn renders_template_into_payload() {
         "config": { "templates": { "text": "Hi {{payload.text}}", "output_path": "reply.text" } },
         "msg": sample_msg(),
         "payload": { "text": "there" },
-        "state": { "user": { "name": "alice" } },
         "connections": []
     });
 
@@ -57,7 +56,6 @@ fn template_error_returns_component_error() {
         "config": { "templates": { "text": "{{#if}}" } },
         "msg": sample_msg(),
         "payload": {},
-        "state": {},
         "connections": []
     });
 

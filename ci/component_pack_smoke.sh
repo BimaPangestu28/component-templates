@@ -26,12 +26,17 @@ make -C "${ROOT_DIR}" build
 
 if [[ ! -f "${WASM_SRC}" ]]; then
   echo "Missing wasm artifact at ${WASM_SRC}" >&2
-  exit 1
+  echo "Smoke test failed." >&2
+  exit -1
 fi
 
 greentic-pack new --dir "${PACK_DIR}" "${PACK_ID}"
 mkdir -p "${PACK_DIR}/components"
 cp "${WASM_SRC}" "${PACK_DIR}/components/${COMPONENT_ID}.wasm"
+cp "${ROOT_DIR}/component.manifest.json" "${PACK_DIR}/components/component.manifest.json"
+sed -i \
+  "s|\"component_wasm\": \"target/wasm32-wasip2/release/component_templates.wasm\"|\"component_wasm\": \"${COMPONENT_ID}.wasm\"|" \
+  "${PACK_DIR}/components/component.manifest.json"
 
 greentic-flow new \
   --flow "${FLOW_FILE}" \
@@ -44,7 +49,7 @@ cat > "${TMP_DIR}/payload.json" <<'JSON'
 {
   "config": {
     "templates": {
-      "text": "helo: {{{state}}}",
+      "text": "helo: {{entry.seed}}",
       "output_path": "text",
       "wrap": true
     }
@@ -83,46 +88,84 @@ greentic-pack update --in "${PACK_DIR}"
 greentic-pack build --in "${PACK_DIR}"
 
 PACK_ARCHIVE="${PACK_DIR}/dist/$(basename "${PACK_DIR}").gtpack"
-RUN_OUTPUT="$(greentic-runner-cli --pack "${PACK_ARCHIVE}" --flow "${FLOW_ID}" --input '{}' --json | tail -n 1)"
+RUN_OUTPUT="$(greentic-runner-cli --pack "${PACK_ARCHIVE}" --flow "${FLOW_ID}" --input '{"seed":"input"}' --json | tail -n 1)"
 
-ARTIFACTS_DIR="$(echo "${RUN_OUTPUT}" | rg -o '"artifacts_dir":"[^"]+"' | head -n1 | sed 's/.*"artifacts_dir":"//;s/"$//')"
+if command -v rg >/dev/null 2>&1; then
+  ARTIFACTS_DIR="$(echo "${RUN_OUTPUT}" | rg -o '"artifacts_dir":"[^"]+"' | head -n1 | sed 's/.*"artifacts_dir":"//;s/"$//')"
+else
+  ARTIFACTS_DIR="$(echo "${RUN_OUTPUT}" | grep -o '"artifacts_dir":"[^"]*"' | head -n1 | sed 's/.*"artifacts_dir":"//;s/"$//')"
+fi
 if [[ -z "${ARTIFACTS_DIR}" ]]; then
   echo "Could not locate artifacts_dir in runner output." >&2
   echo "${RUN_OUTPUT}" >&2
-  exit 1
+  echo "Smoke test failed." >&2
+  exit -1
 fi
 
 ARTIFACTS_PATH="${ROOT_DIR}/${ARTIFACTS_DIR#./}"
 TRANSCRIPT="${ARTIFACTS_PATH}/transcript.jsonl"
 if [[ ! -f "${TRANSCRIPT}" ]]; then
   echo "Missing transcript at ${TRANSCRIPT}" >&2
-  exit 1
+  echo "Smoke test failed." >&2
+  exit -1
 fi
 
-OUTPUT_LINE="$(rg '"phase":"end"' "${TRANSCRIPT}" | tail -n 1)"
+if command -v rg >/dev/null 2>&1; then
+  OUTPUT_LINE="$(rg '"phase":"end"' "${TRANSCRIPT}" | tail -n 1)"
+else
+  OUTPUT_LINE="$(grep '"phase":"end"' "${TRANSCRIPT}" | tail -n 1)"
+fi
 if command -v jq >/dev/null 2>&1; then
   RENDERED="$(echo "${OUTPUT_LINE}" | jq -r '.. | strings | select(test("helo:"))' | head -n 1)"
   if [[ -z "${RENDERED}" ]]; then
     echo "Did not find rendered template output in transcript." >&2
     echo "${OUTPUT_LINE}" >&2
-    exit 1
+    echo "Smoke test failed." >&2
+    exit -1
   fi
-  echo "${RENDERED}" | rg -q 'input' || {
-    echo "Rendered output did not include injected state." >&2
-    echo "${RENDERED}" >&2
-    exit 1
-  }
+  if command -v rg >/dev/null 2>&1; then
+    echo "${RENDERED}" | rg -q 'helo: input' || {
+      echo "Rendered output did not include input data." >&2
+      echo "${RENDERED}" >&2
+      echo "Smoke test failed." >&2
+      exit -1
+    }
+  else
+    echo "${RENDERED}" | grep -q 'helo: input' || {
+      echo "Rendered output did not include input data." >&2
+      echo "${RENDERED}" >&2
+      echo "Smoke test failed." >&2
+      exit -1
+    }
+  fi
 else
-  echo "${OUTPUT_LINE}" | rg -q 'helo:' || {
-    echo "Did not find rendered template output in transcript." >&2
-    echo "${OUTPUT_LINE}" >&2
-    exit 1
-  }
-  echo "${OUTPUT_LINE}" | rg -q 'input' || {
-    echo "Rendered output did not include injected state." >&2
-    echo "${OUTPUT_LINE}" >&2
-    exit 1
-  }
+  if command -v rg >/dev/null 2>&1; then
+    echo "${OUTPUT_LINE}" | rg -q 'helo:' || {
+      echo "Did not find rendered template output in transcript." >&2
+      echo "${OUTPUT_LINE}" >&2
+      echo "Smoke test failed." >&2
+      exit -1
+    }
+    echo "${OUTPUT_LINE}" | rg -q 'helo: input' || {
+      echo "Rendered output did not include input data." >&2
+      echo "${OUTPUT_LINE}" >&2
+      echo "Smoke test failed." >&2
+      exit -1
+    }
+  else
+    echo "${OUTPUT_LINE}" | grep -q 'helo:' || {
+      echo "Did not find rendered template output in transcript." >&2
+      echo "${OUTPUT_LINE}" >&2
+      echo "Smoke test failed." >&2
+      exit -1
+    }
+    echo "${OUTPUT_LINE}" | grep -q 'helo: input' || {
+      echo "Rendered output did not include input data." >&2
+      echo "${OUTPUT_LINE}" >&2
+      echo "Smoke test failed." >&2
+      exit -1
+    }
+  fi
 fi
 
 echo "Smoke test passed."

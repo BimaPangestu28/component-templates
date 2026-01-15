@@ -33,17 +33,9 @@
       "default": {}
     },
     "payload": {
-      "type": "object",
+      "type": ["object", "array", "string", "number", "boolean", "null"],
       "description": "Incoming node payload exposed to the template context",
       "default": {}
-    },
-    "state": {
-      "type": "object",
-      "description": "Runner-injected execution snapshot; includes input and previous node outputs when input is an object"
-    },
-    "node_id": {
-      "type": "string",
-      "description": "Optional node id to expose state.nodes.<id> as node/node_payload in the template context"
     },
     "connections": {
       "type": "array",

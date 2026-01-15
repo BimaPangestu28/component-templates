@@ -126,11 +126,7 @@ mod exports {
 struct ComponentInvocation {
     config: Value,
     msg: ChannelMessageEnvelope,
-    #[serde(default)]
-    node_id: Option<String>,
     payload: Value,
-    #[serde(default)]
-    state: Value,
     #[serde(default)]
     _connections: Vec<String>,
 }
@@ -256,55 +252,12 @@ fn build_context(invocation: &ComponentInvocation) -> Value {
     let mut root = Map::new();
     root.insert("msg".to_owned(), msg_value);
     root.insert("payload".to_owned(), invocation.payload.clone());
-    root.insert("state".to_owned(), invocation.state.clone());
     root.insert(
         "payload_json".to_owned(),
         Value::String(serde_json::to_string(&invocation.payload).unwrap_or_default()),
     );
-    root.insert(
-        "state_json".to_owned(),
-        Value::String(serde_json::to_string(&invocation.state).unwrap_or_default()),
-    );
-
-    if let Some(node_id) = invocation.node_id.as_deref() {
-        root.insert("node_id".to_owned(), Value::String(node_id.to_owned()));
-        if let Some(node) = resolve_state_node(&invocation.state, node_id) {
-            if let Some(payload) = node.get("payload") {
-                root.insert("node_payload".to_owned(), payload.clone());
-            }
-            root.insert("node".to_owned(), Value::Object(node));
-        }
-    }
-
-    if let Some(state_input) = resolve_state_input(&invocation.state) {
-        for (key, value) in state_input {
-            if is_reserved_key(&key) || root.contains_key(&key) {
-                continue;
-            }
-            root.insert(key.to_owned(), value.to_owned());
-        }
-    }
-
-    if let Value::Object(state_map) = &invocation.state {
-        for (key, value) in state_map {
-            if is_reserved_key(key) || root.contains_key(key) {
-                continue;
-            }
-            root.insert(key.to_owned(), value.to_owned());
-        }
-    }
 
     Value::Object(root)
-}
-
-fn resolve_state_node(state: &Value, node_id: &str) -> Option<Map<String, Value>> {
-    let nodes = state.get("nodes")?.as_object()?;
-    let node = nodes.get(node_id)?.as_object()?;
-    Some(node.clone())
-}
-
-fn resolve_state_input(state: &Value) -> Option<Map<String, Value>> {
-    state.get("input")?.as_object().cloned()
 }
 
 fn render_template(config: &TemplateConfig, context: &Value) -> Result<String, TemplateError> {
@@ -343,10 +296,6 @@ fn nest_payload(path: &str, rendered: &str) -> Value {
 fn normalize_template(raw: &str) -> String {
     let mut normalized = raw.to_owned();
     let replacements = [
-        ("{{{ state }}}", "{{{state_json}}}"),
-        ("{{{state}}}", "{{{state_json}}}"),
-        ("{{ state }}", "{{state_json}}"),
-        ("{{state}}", "{{state_json}}"),
         ("{{{ payload }}}", "{{{payload_json}}}"),
         ("{{{payload}}}", "{{{payload_json}}}"),
         ("{{ payload }}", "{{payload_json}}"),
@@ -383,23 +332,6 @@ fn ensure_scope(msg: &ChannelMessageEnvelope) -> Result<(), InvokeFailure> {
     }
 
     Ok(())
-}
-
-fn is_reserved_key(key: &str) -> bool {
-    matches!(
-        key,
-        "state"
-            | "payload"
-            | "msg"
-            | "config"
-            | "templates"
-            | "routing"
-            | "state_json"
-            | "payload_json"
-            | "node"
-            | "node_id"
-            | "node_payload"
-    )
 }
 
 #[derive(Debug)]
@@ -440,7 +372,7 @@ mod tests {
 
     use super::*;
 
-    fn sample_invocation(template: &str, payload: Value, state: Value) -> ComponentInvocation {
+    fn sample_invocation(template: &str, payload: Value) -> ComponentInvocation {
         let mut tenant_ctx = greentic_types::TenantCtx::new(
             greentic_types::EnvId::try_from("dev").unwrap(),
             greentic_types::TenantId::try_from("tenant").unwrap(),
@@ -459,9 +391,7 @@ mod tests {
                 attachments: Vec::new(),
                 metadata: Default::default(),
             },
-            node_id: None,
             payload,
-            state,
             _connections: Vec::new(),
         }
     }
@@ -469,9 +399,8 @@ mod tests {
     #[test]
     fn renders_basic_template() {
         let invocation = sample_invocation(
-            "Hello {{state.user.name}}! You asked: {{payload.text}}",
+            "Hello! You asked: {{payload.text}}",
             json!({ "text": "weather?" }),
-            json!({ "user": { "name": "Alice" } }),
         );
 
         let result = invoke_template(
@@ -483,7 +412,7 @@ mod tests {
         let json: Value = serde_json::from_str(&result).expect("result json");
         assert_eq!(
             json["payload"],
-            json!({ "text": "Hello Alice! You asked: weather?" })
+            json!({ "text": "Hello! You asked: weather?" })
         );
         assert!(json["error"].is_null());
         assert_eq!(json["state_updates"], json!({}));
@@ -491,11 +420,7 @@ mod tests {
 
     #[test]
     fn missing_fields_render_empty() {
-        let invocation = sample_invocation(
-            "Hello {{state.user.name}}! {{payload.missing}}",
-            json!({ "text": "ping" }),
-            json!({}),
-        );
+        let invocation = sample_invocation("Hello! {{payload.missing}}", json!({ "text": "ping" }));
 
         let result = invoke_template(
             SUPPORTED_OPERATION,
@@ -504,13 +429,13 @@ mod tests {
         .expect("invoke should succeed");
 
         let json: Value = serde_json::from_str(&result).expect("result json");
-        assert_eq!(json["payload"], json!({ "text": "Hello ! " }));
+        assert_eq!(json["payload"], json!({ "text": "Hello! " }));
         assert!(json["error"].is_null());
     }
 
     #[test]
     fn template_error_is_reported() {
-        let invocation = sample_invocation("{{#if}}", json!({}), json!({}));
+        let invocation = sample_invocation("{{#if}}", json!({}));
 
         let result = invoke_template(
             SUPPORTED_OPERATION,
@@ -528,7 +453,7 @@ mod tests {
     fn supports_output_path_and_wrap_toggle() {
         let invocation = ComponentInvocation {
             config: json!({ "templates": { "text": "Hi", "output_path": "reply.body", "wrap": true } }),
-            ..sample_invocation("unused", json!({}), json!({}))
+            ..sample_invocation("unused", json!({}))
         };
 
         let result = invoke_template(
@@ -542,7 +467,7 @@ mod tests {
 
         let raw_invocation = ComponentInvocation {
             config: json!({ "templates": { "text": "Hi", "wrap": false } }),
-            ..sample_invocation("unused", json!({}), json!({}))
+            ..sample_invocation("unused", json!({}))
         };
 
         let raw_result = invoke_template(
@@ -556,30 +481,8 @@ mod tests {
     }
 
     #[test]
-    fn implicit_lookup_uses_state() {
-        let invocation = sample_invocation(
-            "My name is {{name}}",
-            json!({}),
-            json!({ "name": "Maarten" }),
-        );
-
-        let result = invoke_template(
-            SUPPORTED_OPERATION,
-            &serde_json::to_string(&invocation).expect("serialize invocation"),
-        )
-        .expect("invoke");
-
-        let json: Value = serde_json::from_str(&result).expect("result json");
-        assert_eq!(json["payload"]["text"], "My name is Maarten");
-    }
-
-    #[test]
     fn explicit_payload_stays_explicit() {
-        let invocation = sample_invocation(
-            "{{payload.name}}",
-            json!({ "name": "PayloadName" }),
-            json!({ "name": "StateName" }),
-        );
+        let invocation = sample_invocation("{{payload.name}}", json!({ "name": "PayloadName" }));
 
         let result = invoke_template(
             SUPPORTED_OPERATION,
@@ -593,11 +496,8 @@ mod tests {
 
     #[test]
     fn debug_stringification_is_compact() {
-        let invocation = sample_invocation(
-            "state={{state}} payload={{payload}}",
-            json!({ "foo": "bar", "count": 2 }),
-            json!({ "alpha": true, "beta": 3 }),
-        );
+        let invocation =
+            sample_invocation("payload={{payload}}", json!({ "foo": "bar", "count": 2 }));
 
         let result = invoke_template(
             SUPPORTED_OPERATION,
@@ -611,9 +511,6 @@ mod tests {
             .expect("rendered string")
             .to_string();
 
-        assert!(rendered.contains("state={"));
-        assert!(rendered.contains("&quot;alpha&quot;:true"));
-        assert!(rendered.contains("&quot;beta&quot;:3"));
         assert!(rendered.contains("payload={"));
         assert!(rendered.contains("&quot;foo&quot;:&quot;bar&quot;"));
         assert!(rendered.contains("&quot;count&quot;:2"));
@@ -621,26 +518,8 @@ mod tests {
     }
 
     #[test]
-    fn state_shadowing_respects_reserved_keys() {
-        let invocation = sample_invocation(
-            "{{payload.name}}|{{name}}|{{state.name}}",
-            json!({ "name": "PayloadName" }),
-            json!({ "name": "StateName", "payload": "shadowed" }),
-        );
-
-        let result = invoke_template(
-            SUPPORTED_OPERATION,
-            &serde_json::to_string(&invocation).expect("serialize invocation"),
-        )
-        .expect("invoke");
-
-        let json: Value = serde_json::from_str(&result).expect("result json");
-        assert_eq!(json["payload"]["text"], "PayloadName|StateName|StateName");
-    }
-
-    #[test]
     fn missing_scope_fails_closed() {
-        let mut invocation = sample_invocation("{{name}}", json!({}), json!({ "name": "x" }));
+        let mut invocation = sample_invocation("{{payload.name}}", json!({ "name": "x" }));
         invocation.msg.session_id = "".to_string();
 
         let result = invoke_template(
@@ -653,8 +532,8 @@ mod tests {
 
     #[test]
     fn different_scopes_do_not_leak() {
-        let inv_a = sample_invocation("{{name}}", json!({}), json!({ "name": "TenantA" }));
-        let mut inv_b = sample_invocation("{{name}}", json!({}), json!({ "name": "TenantB" }));
+        let inv_a = sample_invocation("{{payload.name}}", json!({ "name": "TenantA" }));
+        let mut inv_b = sample_invocation("{{payload.name}}", json!({ "name": "TenantB" }));
         inv_b.msg.tenant = {
             let mut t = greentic_types::TenantCtx::new(
                 greentic_types::EnvId::try_from("prod").unwrap(),
@@ -678,7 +557,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_operation() {
-        let invocation = sample_invocation("Hi", json!({}), json!({}));
+        let invocation = sample_invocation("Hi", json!({}));
         let result = invoke_template("handlebars", &serde_json::to_string(&invocation).unwrap());
         assert!(matches!(
             result,
