@@ -106,6 +106,133 @@ struct ComponentInvocation {
     _connections: Vec<String>,
 }
 
+/// Try to parse input as `ComponentInvocation`. If that fails (e.g. flow YAML sends
+/// a flat format with `template`/`output_path`/`wrap`/`msg` at the top level instead
+/// of nested under `config.templates`), reconstruct the expected shape and retry.
+fn parse_invocation_json(input: &str) -> Result<ComponentInvocation, InvokeFailure> {
+    // Try the canonical format first.
+    if let Ok(inv) = serde_json::from_str::<ComponentInvocation>(input) {
+        return Ok(inv);
+    }
+
+    // Flat-format fallback: extract template/output_path/wrap from top level,
+    // build config.templates, and fill in defaults for missing fields.
+    let mut raw: Value =
+        serde_json::from_str(input).map_err(|e| InvokeFailure::InvalidInput(e.to_string()))?;
+
+    if let Some(obj) = raw.as_object_mut() {
+        // If there's a `template` field at top level, it's the flat format.
+        if obj.contains_key("template") {
+            let text = obj
+                .remove("template")
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default();
+            let output_path = obj
+                .remove("output_path")
+                .and_then(|v| v.as_str().map(String::from));
+            let wrap = obj
+                .remove("wrap")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let mut templates = serde_json::Map::new();
+            templates.insert("text".into(), Value::String(text));
+            templates.insert("wrap".into(), Value::Bool(wrap));
+            if let Some(op) = output_path {
+                templates.insert("output_path".into(), Value::String(op));
+            }
+
+            let config = json!({ "templates": Value::Object(templates) });
+            obj.insert("config".into(), config);
+
+            if !obj.contains_key("payload") {
+                obj.insert("payload".into(), json!({}));
+            }
+        }
+        // Runner InvocationEnvelope format: {ctx, flow_id, op, payload: [bytes], metadata: [bytes]}
+        // Decode the binary payload and reconstruct ComponentInvocation.
+        else if obj.contains_key("ctx")
+            && obj.get("payload").map_or(false, Value::is_array)
+        {
+            let payload_bytes: Vec<u8> = obj
+                .get("payload")
+                .and_then(Value::as_array)
+                .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect())
+                .unwrap_or_default();
+            let decoded_payload: Value = serde_json::from_slice(&payload_bytes)
+                .unwrap_or(Value::Object(Default::default()));
+
+            // The decoded payload typically has {"text": "template..."} from flow mappings.
+            let template_text = decoded_payload
+                .get("text")
+                .or_else(|| decoded_payload.get("template"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let output_path = decoded_payload
+                .get("output_path")
+                .and_then(Value::as_str)
+                .map(String::from);
+            let wrap = decoded_payload
+                .get("wrap")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+
+            let mut templates = serde_json::Map::new();
+            templates.insert("text".into(), Value::String(template_text));
+            templates.insert("wrap".into(), Value::Bool(wrap));
+            if let Some(op) = output_path {
+                templates.insert("output_path".into(), Value::String(op));
+            }
+
+            let config = json!({ "templates": Value::Object(templates) });
+
+            // Build msg from ctx for scope validation.
+            let ctx_val = obj.get("ctx").cloned().unwrap_or(json!({}));
+            let flow_id = obj
+                .get("flow_id")
+                .and_then(Value::as_str)
+                .unwrap_or("flow")
+                .to_string();
+            let session_id = ctx_val
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or(&flow_id)
+                .to_string();
+
+            let msg = json!({
+                "id": &flow_id,
+                "tenant": ctx_val,
+                "channel": "flow",
+                "session_id": session_id,
+                "text": "",
+                "metadata": {}
+            });
+
+            obj.clear();
+            obj.insert("config".into(), config);
+            obj.insert("msg".into(), msg);
+            obj.insert("payload".into(), decoded_payload);
+        }
+    }
+
+    serde_json::from_value::<ComponentInvocation>(raw)
+        .map_err(|e| InvokeFailure::InvalidInput(e.to_string()))
+}
+
+fn parse_invocation_cbor(bytes: &[u8]) -> Result<ComponentInvocation, InvokeFailure> {
+    // Try canonical format first.
+    if let Ok(inv) = decode_cbor::<ComponentInvocation>(bytes) {
+        return Ok(inv);
+    }
+
+    // Fallback: decode as generic Value, transform, then re-parse.
+    let raw: Value = decode_cbor(bytes)?;
+    let json_str =
+        serde_json::to_string(&raw).map_err(|e| InvokeFailure::InvalidInput(e.to_string()))?;
+    parse_invocation_json(&json_str)
+}
+
 #[derive(Debug, Deserialize)]
 struct TemplatesConfig {
     text: String,
@@ -479,7 +606,7 @@ fn i18n_keys() -> Vec<String> {
 }
 
 fn run_component_cbor(input: Vec<u8>, _state: Vec<u8>) -> (Vec<u8>, Vec<u8>) {
-    let invocation: Result<ComponentInvocation, InvokeFailure> = decode_cbor(&input);
+    let invocation = parse_invocation_cbor(&input);
     let result = match invocation {
         Ok(invocation) => {
             invoke_template_from_invocation(invocation).unwrap_or_else(|err| ComponentResult {
@@ -527,15 +654,14 @@ pub fn describe_payload() -> String {
 
 /// Entry point used by both sync and streaming invocations.
 pub fn invoke_template(_operation: &str, input: &str) -> Result<String, InvokeFailure> {
-    if _operation != SUPPORTED_OPERATION {
+    if _operation != SUPPORTED_OPERATION && _operation != "handlebars" {
         return Err(InvokeFailure::UnsupportedOperation(format!(
-            "operation `{}` is not supported; use `{}`",
+            "operation `{}` is not supported; use `{}` or `handlebars`",
             _operation, SUPPORTED_OPERATION
         )));
     }
 
-    let invocation: ComponentInvocation =
-        serde_json::from_str(input).map_err(|err| InvokeFailure::InvalidInput(err.to_string()))?;
+    let invocation = parse_invocation_json(input)?;
 
     let result = invoke_template_from_invocation(invocation)?;
 
@@ -885,10 +1011,78 @@ mod tests {
     #[test]
     fn rejects_unsupported_operation() {
         let invocation = sample_invocation("Hi", json!({}));
-        let result = invoke_template("handlebars", &serde_json::to_string(&invocation).unwrap());
+        let result = invoke_template("unknown_op", &serde_json::to_string(&invocation).unwrap());
         assert!(matches!(
             result,
             Err(InvokeFailure::UnsupportedOperation(_))
         ));
+    }
+
+    #[test]
+    fn invocation_envelope_format_works() {
+        // Runner wraps flow input in InvocationEnvelope with binary payload bytes.
+        let template = "Setup complete for {{msg.channel}}.";
+        let payload_json = json!({"text": template});
+        let payload_bytes: Vec<u8> = serde_json::to_vec(&payload_json).unwrap();
+        let payload_arr: Vec<Value> = payload_bytes.iter().map(|b| json!(*b as u64)).collect();
+
+        let envelope_input = json!({
+            "ctx": {
+                "env": "dev",
+                "tenant": "default",
+                "tenant_id": "default",
+                "session_id": "session-1",
+                "attempt": 0
+            },
+            "flow_id": "setup_default",
+            "node_id": "collect_inputs",
+            "op": "handlebars",
+            "payload": payload_arr,
+            "metadata": [110, 117, 108, 108]
+        });
+
+        let result = invoke_template(
+            SUPPORTED_OPERATION,
+            &serde_json::to_string(&envelope_input).unwrap(),
+        )
+        .expect("InvocationEnvelope format should work");
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["payload"]["text"],
+            "Setup complete for flow."
+        );
+        assert!(parsed["error"].is_null());
+    }
+
+    #[test]
+    fn flat_format_fallback_works() {
+        // Flow YAML sends template/output_path/wrap at top level (not nested in config)
+        let flat_input = json!({
+            "msg": {
+                "id": "msg-1",
+                "tenant": { "env": "dev", "tenant": "tenant", "tenant_id": "tenant", "session_id": "session-1", "attempt": 0 },
+                "channel": "setup",
+                "session_id": "session-1",
+                "text": "hello",
+                "metadata": {}
+            },
+            "template": "Setup complete for {{msg.channel}}.",
+            "output_path": "text",
+            "wrap": true
+        });
+
+        let result = invoke_template(
+            SUPPORTED_OPERATION,
+            &serde_json::to_string(&flat_input).unwrap(),
+        )
+        .expect("flat format should work");
+
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(
+            parsed["payload"]["text"],
+            "Setup complete for setup."
+        );
+        assert!(parsed["error"].is_null());
     }
 }
